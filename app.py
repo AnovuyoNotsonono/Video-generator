@@ -19,6 +19,16 @@ MODEL_ID = "fal-ai/veo3/fast"
 OUTPUT_DIR = "generated_videos"
 
 st.set_page_config(page_title="AI Video Generator", page_icon="🎬")
+
+# ---- Simple access gate ----
+# Prevents random visitors from spending your fal.ai balance.
+# Set APP_PASSWORD in Streamlit Cloud secrets (or as a local env var).
+app_password = os.environ.get("APP_PASSWORD") or st.secrets.get("APP_PASSWORD")
+if app_password:
+    entered = st.text_input("Enter access password", type="password")
+    if entered != app_password:
+        st.stop()
+
 st.title("🎬 AI Video Generator")
 st.caption("Text prompt in, video out — powered by Veo 3 Fast via fal.ai")
 
