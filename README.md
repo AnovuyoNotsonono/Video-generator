@@ -1,3 +1,4 @@
+HEAD
 # AI Video Generator
 
 A minimal web app for generating short AI videos from text prompts, built with Streamlit and [fal.ai](https://fal.ai)'s Veo 3 Fast API.
@@ -83,3 +84,6 @@ FAL_KEY = "your_key_id:your_key_secret"
 ## License
 
 MIT
+=======
+# Video-generator
+A minimal web app for generating short AI videos from text prompts, built with Streamlit and fal.ai's Veo 3 API.
