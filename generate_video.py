@@ -1,6 +1,6 @@
 """
-AI video generation script: Claude expands a casual prompt into a detailed
-video-generation prompt, then fal.ai's Veo 3 Fast API generates the video.
+AI video generation script with Claude-powered prompt expansion and support
+for chaining longer videos via Veo 3.1's extend-video endpoint.
 
 SETUP:
 1. Sign up at https://fal.ai and get an API key from your dashboard
@@ -13,7 +13,9 @@ SETUP:
 5. Run:  python generate_video.py
 
 PIPELINE:
-  casual prompt -> Claude (expands into detailed cinematic prompt) -> Veo3 -> video
+  casual prompt -> Claude expands it -> Veo3.1 generates first clip (~8 sec)
+  optionally: casual continuation -> Claude expands it -> Veo3.1 extends the clip
+  (repeat extension up to ~20 times for up to ~148 seconds total)
 """
 
 import os
@@ -25,8 +27,9 @@ import anthropic
 import fal_client
 
 # ---- Config ----
-VIDEO_MODEL_ID = "fal-ai/veo3/fast"
-CLAUDE_MODEL_ID = "claude-haiku-4-5-20251001"  # fast + cheap, good fit for prompt rewriting
+VIDEO_MODEL_ID = "fal-ai/veo3.1/fast"          # base text-to-video generation
+EXTEND_MODEL_ID = "fal-ai/veo3.1/extend-video"  # continues an existing clip
+CLAUDE_MODEL_ID = "claude-haiku-4-5-20251001"   # fast + cheap, good fit for prompt rewriting
 OUTPUT_DIR = "generated_videos"
 
 PROMPT_EXPANSION_SYSTEM = """You are a prompt engineer for AI video generation models. \
@@ -43,40 +46,57 @@ Keep the subject and intent of the original prompt fully intact — you are addi
 useful cinematic detail, not changing what the user asked for. Respond with ONLY the \
 expanded prompt text, nothing else — no preamble, no explanation, no quotation marks."""
 
+CONTINUATION_EXPANSION_SYSTEM = """You are a prompt engineer for AI video generation \
+models. You are given a casual description of what should happen NEXT in an existing \
+video clip (the model already sees the last frame of the clip, so you do not need to \
+re-describe the subject, setting, or style from scratch). Expand the description into \
+a clear continuation prompt: what action happens next, how the camera moves (if it \
+should change), and how the mood evolves, if at all. Keep it concise -- this is a \
+short continuation, not a new scene. Respond with ONLY the expanded prompt text, \
+nothing else -- no preamble, no explanation, no quotation marks."""
 
-def expand_prompt(casual_prompt: str) -> str:
-    """
-    Uses Claude to expand a casual prompt into a detailed video-generation prompt.
-    """
+
+def _expand(system_prompt: str, casual_prompt: str) -> str:
     client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY from environment
-
     message = client.messages.create(
         model=CLAUDE_MODEL_ID,
         max_tokens=300,
-        system=PROMPT_EXPANSION_SYSTEM,
+        system=system_prompt,
         messages=[{"role": "user", "content": casual_prompt}],
     )
+    return message.content[0].text.strip()
 
-    expanded = message.content[0].text.strip()
-    return expanded
+
+def expand_prompt(casual_prompt: str) -> str:
+    """Expands a casual prompt into a detailed video-generation prompt."""
+    return _expand(PROMPT_EXPANSION_SYSTEM, casual_prompt)
+
+
+def expand_continuation(casual_continuation: str) -> str:
+    """Expands a casual 'what happens next' description for an extend-video call."""
+    return _expand(CONTINUATION_EXPANSION_SYSTEM, casual_continuation)
 
 
 def on_queue_update(update):
-    """Prints progress logs while the video generation job is running."""
+    """Prints progress logs while a fal.ai job is running."""
     if isinstance(update, fal_client.InProgress):
         for log in update.logs:
             print(f"  [status] {log['message']}")
 
 
-def generate_video(casual_prompt: str, aspect_ratio: str = "16:9") -> str:
-    """
-    Full pipeline: expand the prompt with Claude, then generate the video with Veo3.
-    Returns the URL of the generated video.
-    """
+def _check_keys():
     if not os.environ.get("FAL_KEY"):
         sys.exit("ERROR: FAL_KEY environment variable not set.")
     if not os.environ.get("ANTHROPIC_API_KEY"):
         sys.exit("ERROR: ANTHROPIC_API_KEY environment variable not set.")
+
+
+def generate_video(casual_prompt: str, aspect_ratio: str = "16:9") -> str:
+    """
+    Generates the FIRST clip: expands the prompt with Claude, then calls Veo3.1.
+    Returns the video URL.
+    """
+    _check_keys()
 
     print(f"Original prompt: {casual_prompt}")
     print("Expanding prompt with Claude...")
@@ -92,12 +112,38 @@ def generate_video(casual_prompt: str, aspect_ratio: str = "16:9") -> str:
     )
 
     video_url = result["video"]["url"]
-    print(f"\nDone! Video URL: {video_url}")
+    print(f"\nClip done! Video URL: {video_url}")
+    return video_url
+
+
+def continue_video(previous_video_url: str, casual_continuation: str) -> str:
+    """
+    Extends an existing clip: expands the continuation prompt with Claude,
+    then calls Veo3.1's extend-video endpoint. Returns the new (extended) video URL.
+    """
+    _check_keys()
+
+    print(f"Continuing from: {previous_video_url}")
+    print(f"Continuation idea: {casual_continuation}")
+    print("Expanding continuation prompt with Claude...")
+    detailed_continuation = expand_continuation(casual_continuation)
+    print(f"Expanded continuation: {detailed_continuation}\n")
+
+    print(f"Submitting job to {EXTEND_MODEL_ID} ...")
+    result = fal_client.subscribe(
+        EXTEND_MODEL_ID,
+        arguments={"video_url": previous_video_url, "prompt": detailed_continuation},
+        with_logs=True,
+        on_queue_update=on_queue_update,
+    )
+
+    video_url = result["video"]["url"]
+    print(f"\nExtended! Video URL: {video_url}")
     return video_url
 
 
 def download_video(url: str, filename: str) -> str:
-    """Downloads the generated video locally."""
+    """Downloads a video locally."""
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     filepath = os.path.join(OUTPUT_DIR, filename)
     urllib.request.urlretrieve(url, filepath)
@@ -106,11 +152,15 @@ def download_video(url: str, filename: str) -> str:
 
 
 if __name__ == "__main__":
-    # Edit this prompt to test different generations -- try something casual/brief,
-    # since the whole point is Claude fleshes out the detail for you.
+    # --- First clip ---
     test_prompt = "a drone shot over some mountains at sunrise"
-
-    url = generate_video(test_prompt, aspect_ratio="16:9")
+    video_url = generate_video(test_prompt, aspect_ratio="16:9")
 
     timestamp = int(time.time())
-    download_video(url, f"video_{timestamp}.mp4")
+    download_video(video_url, f"video_{timestamp}_part1.mp4")
+
+    # --- Extend it by one more segment ---
+    # Comment this whole block out if you just want a single ~8 second clip.
+    continuation_prompt = "the drone descends slowly toward a lake in the valley below"
+    extended_url = continue_video(video_url, continuation_prompt)
+    download_video(extended_url, f"video_{timestamp}_part2.mp4")
