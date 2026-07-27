@@ -19,6 +19,7 @@ PIPELINE:
 """
 
 import os
+import subprocess
 import sys
 import time
 import urllib.request
@@ -151,16 +152,72 @@ def download_video(url: str, filename: str) -> str:
     return filepath
 
 
+def concatenate_videos(filepaths: list, output_filename: str) -> str:
+    """
+    Merges multiple video files into one using ffmpeg's concat demuxer.
+    Requires ffmpeg to be installed and on your PATH:
+        Mac:     brew install ffmpeg
+        Ubuntu:  sudo apt install ffmpeg
+        Windows: https://ffmpeg.org/download.html
+
+    Since all clips come from the same extend-video chain (same codec,
+    resolution, and frame rate), the fast "concat demuxer" method works
+    without needing to re-encode anything.
+    """
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    output_path = os.path.join(OUTPUT_DIR, output_filename)
+
+    # ffmpeg's concat demuxer needs a text file listing the parts, in order
+    list_path = os.path.join(OUTPUT_DIR, "_concat_list.txt")
+    with open(list_path, "w") as f:
+        for path in filepaths:
+            # ffmpeg wants forward slashes and quoted paths in this list file
+            abs_path = os.path.abspath(path).replace("\\", "/")
+            f.write(f"file '{abs_path}'\n")
+
+    print(f"Merging {len(filepaths)} clips into {output_path} ...")
+    result = subprocess.run(
+        [
+            "ffmpeg",
+            "-y",  # overwrite output if it already exists
+            "-f", "concat",
+            "-safe", "0",
+            "-i", list_path,
+            "-c", "copy",  # no re-encoding needed, same source codec throughout
+            output_path,
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    os.remove(list_path)
+
+    if result.returncode != 0:
+        print("ffmpeg failed. Is it installed? (brew install ffmpeg / apt install ffmpeg)")
+        print(result.stderr)
+        sys.exit(1)
+
+    print(f"Merged video saved to: {output_path}")
+    return output_path
+
+
 if __name__ == "__main__":
     # --- First clip ---
     test_prompt = "a drone shot over some mountains at sunrise"
     video_url = generate_video(test_prompt, aspect_ratio="16:9")
 
     timestamp = int(time.time())
-    download_video(video_url, f"video_{timestamp}_part1.mp4")
+    part1_path = download_video(video_url, f"video_{timestamp}_part1.mp4")
 
     # --- Extend it by one more segment ---
     # Comment this whole block out if you just want a single ~8 second clip.
     continuation_prompt = "the drone descends slowly toward a lake in the valley below"
     extended_url = continue_video(video_url, continuation_prompt)
-    download_video(extended_url, f"video_{timestamp}_part2.mp4")
+    part2_path = download_video(extended_url, f"video_{timestamp}_part2.mp4")
+
+    # --- Merge both parts into one final video ---
+    final_path = concatenate_videos(
+        [part1_path, part2_path],
+        f"video_{timestamp}_final.mp4",
+    )
+    print(f"\nFinal merged video: {final_path}")
