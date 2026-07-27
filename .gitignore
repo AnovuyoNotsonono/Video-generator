@@ -2,3 +2,4 @@ generated_videos/
 venv/
 .env
 Kling_api.txt
+test_scripts/
