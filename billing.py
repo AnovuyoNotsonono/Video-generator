@@ -67,7 +67,19 @@ def _try_streamlit_secret(name: str):
         import streamlit as st
         return st.secrets.get(name)
     except Exception:
+        # Covers both "no secrets.toml file exists at all" (local dev without
+        # one) and "key just isn't set" -- either way, treat as not found.
         return None
+
+
+def safe_secret(name: str):
+    """
+    Public helper: checks an env var first, then Streamlit secrets (safely --
+    won't crash if no secrets.toml exists at all, which happens often in
+    local dev when you're using env vars instead). Returns None if not found
+    anywhere, rather than raising.
+    """
+    return os.environ.get(name) or _try_streamlit_secret(name)
 
 
 def _supabase_client():

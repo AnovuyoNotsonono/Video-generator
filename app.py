@@ -18,7 +18,7 @@ ui.inject_theme()
 ui.slate_bar("REEL-001")
 
 # ---- Optional extra password gate (on top of the credit system) ----
-app_password = os.environ.get("APP_PASSWORD") or st.secrets.get("APP_PASSWORD")
+app_password = billing.safe_secret("APP_PASSWORD")
 if app_password:
     entered = st.text_input("Enter access password", type="password")
     if entered != app_password:

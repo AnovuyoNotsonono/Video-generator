@@ -24,8 +24,8 @@ if "email" not in st.session_state:
 email = st.session_state.email
 
 # ---- Check core API keys up front ----
-fal_key = os.environ.get("FAL_KEY") or st.secrets.get("FAL_KEY")
-anthropic_key = os.environ.get("ANTHROPIC_API_KEY") or st.secrets.get("ANTHROPIC_API_KEY")
+fal_key = billing.safe_secret("FAL_KEY")
+anthropic_key = billing.safe_secret("ANTHROPIC_API_KEY")
 if not fal_key or not anthropic_key:
     st.error("Missing FAL_KEY or ANTHROPIC_API_KEY. Set them as env vars or Streamlit secrets.")
     st.stop()
@@ -229,7 +229,7 @@ with tab_pricing:
             st.write(f"**${pack_dollars}** → {pack_credits} credits (~{pack_credits // billing.COST_PER_CLIP_CREDITS} clips)")
         with col_action:
             if st.button(f"Buy ${pack_dollars}", key=f"pack_{pack_dollars}"):
-                app_url = os.environ.get("APP_URL") or st.secrets.get("APP_URL", "http://localhost:8501")
+                app_url = billing.safe_secret("APP_URL") or "http://localhost:8501"
                 studio_url = app_url.rstrip("/") + "/Studio"
                 checkout_url = billing.create_checkout_session(
                     email, pack_dollars, success_url=studio_url, cancel_url=studio_url
