@@ -1,15 +1,15 @@
 """
-Streamlit UI for AI video generation with Claude-powered prompt expansion
-and support for extending clips into longer videos (via Veo 3.1 + ffmpeg).
+Streamlit UI for AI video generation with Claude-powered prompt expansion,
+video extension/merging (Veo 3.1 + ffmpeg), and Stripe-backed credits.
 
 SETUP:
-1. pip install streamlit fal-client anthropic --break-system-packages
-2. Install ffmpeg (system tool, not pip):
-       Mac:     brew install ffmpeg
-       Ubuntu:  sudo apt install ffmpeg
-3. export FAL_KEY="your-fal-key-here"
-   export ANTHROPIC_API_KEY="your-claude-key-here"
-4. Run:  streamlit run app.py
+1. pip install streamlit fal-client anthropic supabase stripe --break-system-packages
+2. Install ffmpeg (system tool): brew install ffmpeg / sudo apt install ffmpeg
+3. Set env vars (or Streamlit Cloud secrets):
+       FAL_KEY, ANTHROPIC_API_KEY, SUPABASE_URL, SUPABASE_KEY, STRIPE_SECRET_KEY
+   Optional: APP_PASSWORD (extra access gate on top of the credit system)
+4. See billing.py for the Supabase table setup SQL.
+5. Run:  streamlit run app.py
 """
 
 import os
@@ -20,6 +20,8 @@ import urllib.request
 import anthropic
 import fal_client
 import streamlit as st
+
+import billing
 
 # ---- Config ----
 VIDEO_MODEL_ID = "fal-ai/veo3.1/fast"
@@ -53,7 +55,7 @@ nothing else -- no preamble, no explanation, no quotation marks."""
 
 st.set_page_config(page_title="AI Video Generator", page_icon="🎬")
 
-# ---- Simple access gate ----
+# ---- Optional extra password gate (on top of the credit system) ----
 app_password = os.environ.get("APP_PASSWORD") or st.secrets.get("APP_PASSWORD")
 if app_password:
     entered = st.text_input("Enter access password", type="password")
@@ -63,25 +65,72 @@ if app_password:
 st.title("🎬 AI Video Generator")
 st.caption("Type a rough idea, Claude sharpens the prompt, Veo 3.1 generates it — extend as many times as you like.")
 
-# ---- Check API keys up front ----
+# ---- Check core API keys up front ----
 fal_key = os.environ.get("FAL_KEY") or st.secrets.get("FAL_KEY")
 anthropic_key = os.environ.get("ANTHROPIC_API_KEY") or st.secrets.get("ANTHROPIC_API_KEY")
 
 if not fal_key or not anthropic_key:
-    st.error(
-        "Missing API key(s). Need both FAL_KEY and ANTHROPIC_API_KEY set. "
-        "Locally: export them as env vars. On Streamlit Cloud: add under App settings > Secrets."
-    )
+    st.error("Missing FAL_KEY or ANTHROPIC_API_KEY. Set them as env vars or Streamlit secrets.")
     st.stop()
 
 os.environ["FAL_KEY"] = fal_key
 os.environ["ANTHROPIC_API_KEY"] = anthropic_key
 
+# ---- Handle return from Stripe checkout (before anything else renders) ----
+query_params = st.query_params
+if "session_id" in query_params:
+    session_id = query_params["session_id"]
+    with st.spinner("Confirming your payment..."):
+        try:
+            new_balance = billing.verify_and_credit(session_id)
+            if new_balance is not None:
+                st.success(f"Payment confirmed! New balance: {new_balance} credits.")
+            # Clear the query param so a page refresh doesn't re-trigger this
+            st.query_params.clear()
+        except Exception as e:
+            st.error(f"Couldn't confirm payment: {e}")
+
+# ---- Email gate (identifies the user for credit tracking) ----
+if "email" not in st.session_state:
+    st.subheader("Enter your email to get started")
+    st.caption("We use this to track your credit balance. New accounts get 4 free credits (2 free clips).")
+    email_input = st.text_input("Email")
+    if st.button("Continue", disabled=not email_input.strip()):
+        st.session_state.email = email_input.strip().lower()
+        st.rerun()
+    st.stop()
+
+email = st.session_state.email
+
+# ---- Show credit balance + buy more ----
+try:
+    credits = billing.get_credits(email)
+except Exception as e:
+    st.error(f"Couldn't load your account: {e}")
+    st.stop()
+
+col_balance, col_buy = st.columns([2, 1])
+with col_balance:
+    st.metric("Your credits", credits)
+with col_buy:
+    with st.popover("Buy more credits"):
+        st.caption(f"1 credit = $0.50. Each clip costs {billing.COST_PER_CLIP_CREDITS} credits.")
+        for pack_dollars in billing.PACK_OPTIONS_DOLLARS:
+            pack_credits = pack_dollars * billing.CREDITS_PER_DOLLAR
+            if st.button(f"${pack_dollars} → {pack_credits} credits", key=f"pack_{pack_dollars}"):
+                app_url = os.environ.get("APP_URL") or st.secrets.get("APP_URL", "http://localhost:8501")
+                checkout_url = billing.create_checkout_session(
+                    email, pack_dollars, success_url=app_url, cancel_url=app_url
+                )
+                st.link_button("Complete payment on Stripe →", checkout_url)
+
+st.divider()
+
 # ---- Session state: tracks the chain of clips for the current video ----
 if "parts" not in st.session_state:
-    st.session_state.parts = []          # list of local filepaths, in order
+    st.session_state.parts = []
 if "latest_video_url" not in st.session_state:
-    st.session_state.latest_video_url = None  # fal URL of the most recent clip
+    st.session_state.latest_video_url = None
 
 
 # ---- Core functions ----
@@ -142,19 +191,16 @@ def download_video(url: str, filename: str) -> str:
 def concatenate_videos(filepaths: list, output_filename: str) -> str:
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     output_path = os.path.join(OUTPUT_DIR, output_filename)
-
     list_path = os.path.join(OUTPUT_DIR, "_concat_list.txt")
     with open(list_path, "w") as f:
         for path in filepaths:
             abs_path = os.path.abspath(path).replace("\\", "/")
             f.write(f"file '{abs_path}'\n")
-
     result = subprocess.run(
         ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_path, "-c", "copy", output_path],
         capture_output=True, text=True,
     )
     os.remove(list_path)
-
     if result.returncode != 0:
         raise RuntimeError(f"ffmpeg failed: {result.stderr}")
     return output_path
@@ -169,12 +215,19 @@ if not st.session_state.parts:
     )
     aspect_ratio = st.selectbox("Aspect ratio", ["16:9", "9:16"], index=0)
 
-    if st.button("Generate video", type="primary", disabled=not prompt.strip()):
+    enough_credits = credits >= billing.COST_PER_CLIP_CREDITS
+    if not enough_credits:
+        st.warning(f"You need at least {billing.COST_PER_CLIP_CREDITS} credits to generate a clip. Buy more above.")
+
+    if st.button("Generate video", type="primary", disabled=not prompt.strip() or not enough_credits):
         status_placeholder = st.empty()
         with st.spinner("Generating your video... this usually takes 1-3 minutes."):
             try:
                 video_url, detailed_prompt = generate_first_clip(prompt, aspect_ratio, status_placeholder)
                 status_placeholder.empty()
+
+                # Only deduct credits AFTER successful generation
+                billing.deduct_credits(email, billing.COST_PER_CLIP_CREDITS)
 
                 timestamp = int(time.time())
                 filepath = download_video(video_url, f"video_{timestamp}_part1.mp4")
@@ -195,11 +248,11 @@ else:
     with st.expander("Show expanded prompt(s) Claude used"):
         st.write(st.session_state.get("expanded_prompt", ""))
 
-    # Show the most recent clip as a preview
     st.video(st.session_state.parts[-1])
 
     st.divider()
     st.subheader("Extend this video")
+    st.caption(f"Costs {billing.COST_PER_CLIP_CREDITS} credits, same as a new clip.")
     continuation = st.text_area(
         "What happens next?",
         placeholder="The drone descends slowly toward a lake in the valley below",
@@ -209,7 +262,8 @@ else:
 
     col1, col2 = st.columns(2)
     with col1:
-        if st.button("Extend video", disabled=not continuation.strip()):
+        enough_credits = credits >= billing.COST_PER_CLIP_CREDITS
+        if st.button("Extend video", disabled=not continuation.strip() or not enough_credits):
             status_placeholder = st.empty()
             with st.spinner("Extending your video..."):
                 try:
@@ -217,6 +271,8 @@ else:
                         st.session_state.latest_video_url, continuation, status_placeholder
                     )
                     status_placeholder.empty()
+
+                    billing.deduct_credits(email, billing.COST_PER_CLIP_CREDITS)
 
                     part_num = len(st.session_state.parts) + 1
                     filepath = download_video(
@@ -229,6 +285,8 @@ else:
                 except Exception as e:
                     status_placeholder.empty()
                     st.error(f"Extension failed: {e}")
+        if not enough_credits:
+            st.caption("Not enough credits to extend. Buy more above.")
 
     with col2:
         if st.button("Start a new video"):
@@ -238,7 +296,7 @@ else:
 
     st.divider()
     st.subheader("Finalize")
-    st.caption("Merge all clips into one final video file.")
+    st.caption("Merge all clips into one final video file (free, no extra credits).")
 
     if st.button("Merge & finalize", type="primary"):
         with st.spinner("Merging clips with ffmpeg..."):
@@ -258,7 +316,13 @@ else:
             except Exception as e:
                 st.error(f"Merge failed: {e}. Is ffmpeg installed on this server?")
 
-# ---- Sidebar: past generations ----
+# ---- Sidebar ----
+st.sidebar.header("Account")
+st.sidebar.text(f"Signed in as: {email}")
+if st.sidebar.button("Switch account"):
+    del st.session_state.email
+    st.rerun()
+
 if os.path.isdir(OUTPUT_DIR):
     past_files = sorted(
         [f for f in os.listdir(OUTPUT_DIR) if f.endswith("_final.mp4")], reverse=True
