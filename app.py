@@ -41,19 +41,51 @@ if "email" in st.session_state:
         st.rerun()
     st.stop()
 
-# ---- Sign-up form ----
+# ---- Sign-up form (two steps: send a code, then verify it) ----
 ui.film_divider()
 ui.section_label("Slate in")
-st.subheader("Enter your email to get started")
-st.caption("Tracks your credit balance. New accounts start with 4 free credits (2 free clips).")
 
-email_input = st.text_input("Email", label_visibility="collapsed", placeholder="you@example.com")
+if "otp_sent_to" not in st.session_state:
+    st.session_state.otp_sent_to = None
 
-if st.button("Continue", type="primary", disabled=not email_input.strip()):
-    email = email_input.strip().lower()
-    try:
-        billing.get_or_create_user(email)  # creates the account if it doesn't exist yet
-        st.session_state.email = email
-        st.switch_page("pages/1_Studio.py")
-    except Exception as e:
-        st.error(f"Couldn't create your account: {e}")
+if not st.session_state.otp_sent_to:
+    # ---- Step 1: collect email, send a verification code ----
+    st.subheader("Enter your email to get started")
+    st.caption("We'll send a 6-digit code to verify it's really you. New accounts start with 4 free credits.")
+
+    email_input = st.text_input("Email", label_visibility="collapsed", placeholder="you@example.com")
+
+    if st.button("Send code", type="primary", disabled=not email_input.strip()):
+        email = email_input.strip().lower()
+        try:
+            billing.send_login_code(email)
+            st.session_state.otp_sent_to = email
+            st.rerun()
+        except Exception as e:
+            st.error(f"Couldn't send verification code: {e}")
+
+else:
+    # ---- Step 2: verify the code ----
+    st.subheader("Check your email")
+    st.caption(f"We sent a 6-digit code to **{st.session_state.otp_sent_to}**. Enter it below.")
+
+    code_input = st.text_input("Verification code", label_visibility="collapsed", placeholder="123456", max_chars=6)
+
+    col_verify, col_back = st.columns(2)
+    with col_verify:
+        if st.button("Verify", type="primary", disabled=not code_input.strip()):
+            email = st.session_state.otp_sent_to
+            if billing.verify_login_code(email, code_input.strip()):
+                try:
+                    billing.get_or_create_user(email)  # creates the account if it doesn't exist yet
+                    st.session_state.email = email
+                    st.session_state.otp_sent_to = None
+                    st.switch_page("pages/1_Studio.py")
+                except Exception as e:
+                    st.error(f"Couldn't create your account: {e}")
+            else:
+                st.error("That code didn't work. Check for typos, or it may have expired -- try sending a new one.")
+    with col_back:
+        if st.button("Use a different email"):
+            st.session_state.otp_sent_to = None
+            st.rerun()

@@ -93,6 +93,27 @@ def _stripe_client():
     return stripe
 
 
+# ---- Email verification (OTP) ----
+# Requires the Supabase "Magic Link" email template to be edited to send
+# {{ .Token }} instead of {{ .ConfirmationURL }}, so it emails a 6-digit
+# code instead of a clickable link (see billing.py setup notes / conversation).
+
+def send_login_code(email: str):
+    """Sends a 6-digit verification code to the given email."""
+    client = _supabase_client()
+    client.auth.sign_in_with_otp({"email": email})
+
+
+def verify_login_code(email: str, code: str) -> bool:
+    """Checks a 6-digit code against Supabase. Returns True if valid."""
+    client = _supabase_client()
+    try:
+        result = client.auth.verify_otp({"email": email, "token": code, "type": "email"})
+        return result.user is not None
+    except Exception:
+        return False
+
+
 # ---- Credit balance management ----
 
 def get_or_create_user(email: str) -> int:
