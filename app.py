@@ -114,9 +114,9 @@ with col_balance:
     st.metric("Your credits", credits)
 with col_buy:
     with st.popover("Buy more credits"):
-        st.caption(f"1 credit = $0.50. Each clip costs {billing.COST_PER_CLIP_CREDITS} credits.")
+        st.caption(f"1 credit = ${billing.PRICE_PER_CREDIT:.2f}. Each clip costs {billing.COST_PER_CLIP_CREDITS} credits.")
         for pack_dollars in billing.PACK_OPTIONS_DOLLARS:
-            pack_credits = pack_dollars * billing.CREDITS_PER_DOLLAR
+            pack_credits = billing.credits_for_dollars(pack_dollars)
             if st.button(f"${pack_dollars} → {pack_credits} credits", key=f"pack_{pack_dollars}"):
                 app_url = os.environ.get("APP_URL") or st.secrets.get("APP_URL", "http://localhost:8501")
                 checkout_url = billing.create_checkout_session(
