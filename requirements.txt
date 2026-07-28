@@ -1,3 +1,5 @@
 streamlit
 fal-client
 anthropic
+supabase
+stripe
