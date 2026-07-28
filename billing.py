@@ -44,9 +44,15 @@ import os
 import stripe
 from supabase import create_client
 
-CREDITS_PER_DOLLAR = 0.833      # 1 credit = $1.20 (2x markup over ~$0.60 real cost per credit)
+PRICE_PER_CREDIT = 1.20         # what a user pays per credit (2x markup over ~$0.60 real cost)
 COST_PER_CLIP_CREDITS = 2       # each generation/extension call costs this many credits (~$2.40, against ~$1.20 real cost)
 PACK_OPTIONS_DOLLARS = [15, 30, 60]  # $15 minimum nets ~$6-7 profit after generation cost + Stripe fees
+
+
+def credits_for_dollars(dollars: float) -> int:
+    """Converts a dollar amount into a whole number of credits (always rounds down,
+    so you never accidentally give away a fraction of a credit for free)."""
+    return int(dollars // PRICE_PER_CREDIT)
 
 
 def _get_secret(name: str) -> str:
@@ -125,7 +131,7 @@ def add_credits(email: str, amount: int) -> int:
 def create_checkout_session(email: str, pack_dollars: int, success_url: str, cancel_url: str) -> str:
     """Creates a Stripe Checkout session for a credit pack purchase. Returns the checkout URL."""
     client = _stripe_client()
-    credits_in_pack = pack_dollars * CREDITS_PER_DOLLAR
+    credits_in_pack = credits_for_dollars(pack_dollars)
 
     session = client.checkout.Session.create(
         mode="payment",
