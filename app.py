@@ -22,6 +22,7 @@ import fal_client
 import streamlit as st
 
 import billing
+import ui
 
 # ---- Config ----
 VIDEO_MODEL_ID = "fal-ai/veo3.1/fast"
@@ -53,7 +54,9 @@ short continuation, not a new scene. Respond with ONLY the expanded prompt text,
 nothing else -- no preamble, no explanation, no quotation marks."""
 
 
-st.set_page_config(page_title="AI Video Generator", page_icon="🎬")
+st.set_page_config(page_title="AI Video Generator", page_icon="🎬", layout="centered")
+ui.inject_theme()
+ui.slate_bar("REEL-001")
 
 # ---- Optional extra password gate (on top of the credit system) ----
 app_password = os.environ.get("APP_PASSWORD") or st.secrets.get("APP_PASSWORD")
@@ -62,8 +65,11 @@ if app_password:
     if entered != app_password:
         st.stop()
 
-st.title("🎬 AI Video Generator")
-st.caption("Type a rough idea, Claude sharpens the prompt, Veo 3.1 generates it — extend as many times as you like.")
+ui.hero(
+    "SHOOT YOUR SHOT",
+    "SHOT",
+    "Describe a scene in plain words. Claude sharpens it into a cinematic prompt, Veo 3.1 shoots it — extend the take as many times as you like.",
+)
 
 # ---- Check core API keys up front ----
 fal_key = os.environ.get("FAL_KEY") or st.secrets.get("FAL_KEY")
@@ -92,9 +98,10 @@ if "session_id" in query_params:
 
 # ---- Email gate (identifies the user for credit tracking) ----
 if "email" not in st.session_state:
+    ui.section_label("Slate in")
     st.subheader("Enter your email to get started")
-    st.caption("We use this to track your credit balance. New accounts get 4 free credits (2 free clips).")
-    email_input = st.text_input("Email")
+    st.caption("Tracks your credit balance. New accounts start with 4 free credits (2 free clips).")
+    email_input = st.text_input("Email", label_visibility="collapsed", placeholder="you@example.com")
     if st.button("Continue", disabled=not email_input.strip()):
         st.session_state.email = email_input.strip().lower()
         st.rerun()
@@ -111,9 +118,11 @@ except Exception as e:
 
 col_balance, col_buy = st.columns([2, 1])
 with col_balance:
-    st.metric("Your credits", credits)
+    ui.credit_counter(credits)
 with col_buy:
-    with st.popover("Buy more credits"):
+    st.write("")  # vertical alignment nudge
+    with st.popover("Buy credits"):
+        ui.section_label("Top up")
         st.caption(f"1 credit = ${billing.PRICE_PER_CREDIT:.2f}. Each clip costs {billing.COST_PER_CLIP_CREDITS} credits.")
         for pack_dollars in billing.PACK_OPTIONS_DOLLARS:
             pack_credits = billing.credits_for_dollars(pack_dollars)
@@ -124,7 +133,7 @@ with col_buy:
                 )
                 st.link_button("Complete payment on Stripe →", checkout_url)
 
-st.divider()
+ui.film_divider()
 
 # ---- Session state: tracks the chain of clips for the current video ----
 if "parts" not in st.session_state:
@@ -208,10 +217,12 @@ def concatenate_videos(filepaths: list, output_filename: str) -> str:
 
 # ---- UI: starting a new video ----
 if not st.session_state.parts:
+    ui.section_label("Scene 1")
     prompt = st.text_area(
         "Describe the video you want",
         placeholder="A slow cinematic drone shot flying over a misty mountain range at sunrise",
         height=100,
+        label_visibility="collapsed",
     )
     aspect_ratio = st.selectbox("Aspect ratio", ["16:9", "9:16"], index=0)
 
@@ -250,7 +261,8 @@ else:
 
     st.video(st.session_state.parts[-1])
 
-    st.divider()
+    ui.film_divider()
+    ui.section_label(f"Take {len(st.session_state.parts) + 1}")
     st.subheader("Extend this video")
     st.caption(f"Costs {billing.COST_PER_CLIP_CREDITS} credits, same as a new clip.")
     continuation = st.text_area(
@@ -294,7 +306,8 @@ else:
             st.session_state.latest_video_url = None
             st.rerun()
 
-    st.divider()
+    ui.film_divider()
+    ui.section_label("Wrap")
     st.subheader("Finalize")
     st.caption("Merge all clips into one final video file (free, no extra credits).")
 
@@ -317,7 +330,7 @@ else:
                 st.error(f"Merge failed: {e}. Is ffmpeg installed on this server?")
 
 # ---- Sidebar ----
-st.sidebar.header("Account")
+st.sidebar.markdown('<div class="section-label">Crew</div>', unsafe_allow_html=True)
 st.sidebar.text(f"Signed in as: {email}")
 if st.sidebar.button("Switch account"):
     del st.session_state.email
@@ -328,6 +341,6 @@ if os.path.isdir(OUTPUT_DIR):
         [f for f in os.listdir(OUTPUT_DIR) if f.endswith("_final.mp4")], reverse=True
     )
     if past_files:
-        st.sidebar.header("Past finished videos")
+        st.sidebar.markdown('<div class="section-label">Archive</div>', unsafe_allow_html=True)
         for fname in past_files[:10]:
             st.sidebar.text(fname)
