@@ -71,42 +71,135 @@ with tab_generate:
         ui.credit_counter(credits)
 
     if not st.session_state.parts:
-        ui.section_label("Scene 1")
-        prompt = st.text_area(
-            "Describe the video you want",
-            placeholder="A slow cinematic drone shot flying over a misty mountain range at sunrise",
-            height=100,
-            label_visibility="collapsed",
-        )
-        aspect_ratio = st.selectbox("Aspect ratio", ["16:9", "9:16"], index=0)
+        mode = st.radio("Mode", ["Single clip", "Plan a story"], horizontal=True, label_visibility="collapsed")
 
-        enough_credits = credits >= billing.COST_PER_CLIP_CREDITS
-        if not enough_credits:
-            st.warning(f"You need at least {billing.COST_PER_CLIP_CREDITS} credits. See the Pricing tab.")
+        # ---- MODE: Single clip (original flow) ----
+        if mode == "Single clip":
+            ui.section_label("Scene 1")
+            prompt = st.text_area(
+                "Describe the video you want",
+                placeholder="A slow cinematic drone shot flying over a misty mountain range at sunrise",
+                height=100,
+                label_visibility="collapsed",
+            )
+            aspect_ratio = st.selectbox("Aspect ratio", ["16:9", "9:16"], index=0)
 
-        if st.button("Generate video", type="primary", disabled=not prompt.strip() or not enough_credits):
-            st.session_state.is_generating = True
-            status_placeholder = st.empty()
-            with st.spinner("Generating your video... this usually takes 1-3 minutes."):
-                try:
-                    video_url, detailed_prompt = ve.generate_first_clip(prompt, aspect_ratio, status_placeholder)
-                    status_placeholder.empty()
+            enough_credits = credits >= billing.COST_PER_CLIP_CREDITS
+            if not enough_credits:
+                st.warning(f"You need at least {billing.COST_PER_CLIP_CREDITS} credits. See the Pricing tab.")
 
-                    billing.deduct_credits(email, billing.COST_PER_CLIP_CREDITS)
+            if st.button("Generate video", type="primary", disabled=not prompt.strip() or not enough_credits):
+                st.session_state.is_generating = True
+                status_placeholder = st.empty()
+                with st.spinner("Generating your video... this usually takes 1-3 minutes."):
+                    try:
+                        video_url, detailed_prompt = ve.generate_first_clip(prompt, aspect_ratio, status_placeholder)
+                        status_placeholder.empty()
 
-                    timestamp = int(time.time())
-                    filepath = ve.download_video(video_url, f"video_{timestamp}_part1.mp4")
+                        billing.deduct_credits(email, billing.COST_PER_CLIP_CREDITS)
 
-                    st.session_state.parts = [filepath]
-                    st.session_state.latest_video_url = video_url
-                    st.session_state.timestamp = timestamp
-                    st.session_state.expanded_prompt = detailed_prompt
-                    st.session_state.is_generating = False
-                    st.rerun()
-                except Exception as e:
-                    status_placeholder.empty()
-                    st.session_state.is_generating = False
-                    st.error(f"Generation failed: {e}")
+                        timestamp = int(time.time())
+                        filepath = ve.download_video(video_url, f"video_{timestamp}_part1.mp4")
+
+                        st.session_state.parts = [filepath]
+                        st.session_state.latest_video_url = video_url
+                        st.session_state.timestamp = timestamp
+                        st.session_state.expanded_prompt = detailed_prompt
+                        st.session_state.is_generating = False
+                        st.rerun()
+                    except Exception as e:
+                        status_placeholder.empty()
+                        st.session_state.is_generating = False
+                        st.error(f"Generation failed: {e}")
+
+        # ---- MODE: Plan a story (storyboard-first, for consistency) ----
+        else:
+            ui.section_label("Story planning")
+
+            if "storyboard" not in st.session_state:
+                story_idea = st.text_area(
+                    "What's the story?",
+                    placeholder="A fox exploring an abandoned train station at night, discovering it's not as empty as it seems",
+                    height=100,
+                )
+                num_scenes = st.slider("Number of scenes", min_value=2, max_value=6, value=3)
+                aspect_ratio = st.selectbox("Aspect ratio", ["16:9", "9:16"], index=0, key="story_aspect")
+
+                if st.button("Plan storyboard", type="primary", disabled=not story_idea.strip()):
+                    with st.spinner("Planning your story with Claude..."):
+                        try:
+                            storyboard = ve.plan_storyboard(story_idea, num_scenes)
+                            st.session_state.storyboard = storyboard
+                            st.session_state.story_aspect_ratio = aspect_ratio
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Couldn't plan storyboard: {e}")
+
+            else:
+                storyboard = st.session_state.storyboard
+                total_cost = len(storyboard["scenes"]) * billing.COST_PER_CLIP_CREDITS
+
+                st.write("**Story bible** (kept consistent across every scene)")
+                storyboard["story_bible"] = st.text_area(
+                    "Story bible", storyboard["story_bible"], height=80, label_visibility="collapsed"
+                )
+
+                st.write(f"**{len(storyboard['scenes'])} scenes** — review and edit before generating:")
+                for i, scene in enumerate(storyboard["scenes"]):
+                    storyboard["scenes"][i] = st.text_area(
+                        f"Scene {i + 1}", scene, height=70, key=f"scene_{i}"
+                    )
+
+                st.info(f"This will cost **{total_cost} credits** total ({len(storyboard['scenes'])} clips).")
+                enough_credits = credits >= total_cost
+                if not enough_credits:
+                    st.warning(f"You need {total_cost} credits but only have {credits}. See the Pricing tab.")
+
+                col_gen, col_cancel = st.columns(2)
+                with col_gen:
+                    if st.button("Generate all scenes", type="primary", disabled=not enough_credits):
+                        st.session_state.is_generating = True
+                        status_placeholder = st.empty()
+                        aspect_ratio = st.session_state.story_aspect_ratio
+                        timestamp = int(time.time())
+                        parts = []
+                        try:
+                            for i, scene in enumerate(storyboard["scenes"]):
+                                with st.spinner(f"Generating scene {i + 1} of {len(storyboard['scenes'])}..."):
+                                    if i == 0:
+                                        combined = ve.combine_bible_and_scene(storyboard["story_bible"], scene)
+                                        video_url, _ = ve.generate_first_clip(combined, aspect_ratio, status_placeholder)
+                                    else:
+                                        video_url, _ = ve.extend_clip(video_url, scene, status_placeholder)
+
+                                    billing.deduct_credits(email, billing.COST_PER_CLIP_CREDITS)
+                                    filepath = ve.download_video(video_url, f"video_{timestamp}_part{i + 1}.mp4")
+                                    parts.append(filepath)
+
+                            status_placeholder.empty()
+                            st.session_state.parts = parts
+                            st.session_state.latest_video_url = video_url
+                            st.session_state.timestamp = timestamp
+                            st.session_state.expanded_prompt = storyboard["story_bible"]
+                            del st.session_state.storyboard
+                            st.session_state.is_generating = False
+                            st.rerun()
+                        except Exception as e:
+                            status_placeholder.empty()
+                            st.session_state.is_generating = False
+                            # Credits already spent for scenes generated before the failure are not refunded,
+                            # since those clips were successfully delivered -- only the failed scene wasn't charged.
+                            st.error(f"Generation failed partway through (scene {len(parts) + 1}): {e}")
+                            if parts:
+                                st.session_state.parts = parts
+                                st.session_state.latest_video_url = video_url
+                                st.session_state.timestamp = timestamp
+                                del st.session_state.storyboard
+                                st.rerun()
+                with col_cancel:
+                    if st.button("Start over"):
+                        del st.session_state.storyboard
+                        st.rerun()
 
     else:
         st.success(f"{len(st.session_state.parts)} clip(s) generated so far (~{len(st.session_state.parts) * 8} sec)")

@@ -38,6 +38,40 @@ should change), and how the mood evolves, if at all. Keep it concise -- this is 
 short continuation, not a new scene. Respond with ONLY the expanded prompt text, \
 nothing else -- no preamble, no explanation, no quotation marks."""
 
+STORYBOARD_SYSTEM = """You are a story editor and cinematographer planning a short \
+video sequence. Given a story idea and a target number of scenes, produce:
+
+1. A "story bible" -- a compact, specific description of the recurring character(s), \
+   setting, and visual style that MUST stay consistent across every scene (exact \
+   physical description of any character, the setting's key visual details, overall \
+   tone/style). This is the anchor that prevents the story from drifting scene to scene.
+2. A sequence of scenes, each a concise description of the action and camera work for \
+   THAT scene only (1-2 sentences). Do not repeat the story bible details in every \
+   scene -- assume the reader already has it. Each scene should flow naturally from \
+   the previous one -- think of it as a continuous shot list, not disconnected clips.
+
+Use the create_storyboard tool to return your answer."""
+
+STORYBOARD_TOOL = {
+    "name": "create_storyboard",
+    "description": "Records a planned video storyboard: a consistent story bible plus an ordered list of scenes.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "story_bible": {
+                "type": "string",
+                "description": "Consistent character/setting/style description that anchors every scene.",
+            },
+            "scenes": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Ordered list of scene descriptions (action + camera work for that scene only).",
+            },
+        },
+        "required": ["story_bible", "scenes"],
+    },
+}
+
 
 def expand(system_prompt: str, casual_prompt: str) -> str:
     client = anthropic.Anthropic()
@@ -48,6 +82,39 @@ def expand(system_prompt: str, casual_prompt: str) -> str:
         messages=[{"role": "user", "content": casual_prompt}],
     )
     return message.content[0].text.strip()
+
+
+def plan_storyboard(story_idea: str, num_scenes: int) -> dict:
+    """
+    Uses Claude (with forced tool-use for reliable structured output) to plan
+    a consistent story bible + ordered scene list for a multi-clip video.
+    Returns {"story_bible": str, "scenes": [str, ...]}.
+    """
+    client = anthropic.Anthropic()
+    message = client.messages.create(
+        model=CLAUDE_MODEL_ID,
+        max_tokens=1000,
+        system=STORYBOARD_SYSTEM,
+        tools=[STORYBOARD_TOOL],
+        tool_choice={"type": "tool", "name": "create_storyboard"},
+        messages=[{
+            "role": "user",
+            "content": f"Story idea: {story_idea}\nNumber of scenes: {num_scenes}",
+        }],
+    )
+
+    for block in message.content:
+        if block.type == "tool_use":
+            return block.input
+
+    raise RuntimeError("Claude did not return a storyboard as expected.")
+
+
+def combine_bible_and_scene(story_bible: str, first_scene: str) -> str:
+    """Merges the story bible with scene 1's description into one prompt for
+    the initial generation call (later scenes go through extend_clip instead,
+    which relies on the previous clip's last frame for continuity)."""
+    return f"{story_bible}\n\nScene: {first_scene}"
 
 
 def generate_first_clip(casual_prompt: str, aspect_ratio: str, status_placeholder) -> tuple:
