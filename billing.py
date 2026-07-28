@@ -93,25 +93,74 @@ def _stripe_client():
     return stripe
 
 
-# ---- Email verification (OTP) ----
-# Requires the Supabase "Magic Link" email template to be edited to send
-# {{ .Token }} instead of {{ .ConfirmationURL }}, so it emails a 6-digit
-# code instead of a clickable link (see billing.py setup notes / conversation).
+# ---- Email verification (self-built OTP, sent via Gmail SMTP) ----
+# NOTE: Supabase's own magic-link/OTP email templates can no longer be
+# customized on new free-tier projects (a platform restriction introduced
+# June 2026), so this builds a lightweight code system instead: we generate
+# the code, store it in our own `login_codes` table, and send it ourselves.
+#
+# Requires a Gmail "App Password" (not your real password):
+#   Google Account > Security > 2-Step Verification > App Passwords
+# Set as secrets:
+#   GMAIL_ADDRESS       (the Gmail address sending the codes)
+#   GMAIL_APP_PASSWORD  (the 16-character app password)
+
+import random
+import smtplib
+from datetime import datetime, timedelta, timezone
+from email.mime.text import MIMEText
+
 
 def send_login_code(email: str):
-    """Sends a 6-digit verification code to the given email."""
+    """Generates a 6-digit code, stores it, and emails it to the user."""
+    code = f"{random.randint(0, 999999):06d}"
+    expires_at = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()
+
     client = _supabase_client()
-    client.auth.sign_in_with_otp({"email": email})
+    client.table("login_codes").insert({
+        "email": email, "code": code, "expires_at": expires_at, "used": False,
+    }).execute()
+
+    gmail_address = _get_secret("GMAIL_ADDRESS")
+    gmail_app_password = _get_secret("GMAIL_APP_PASSWORD")
+
+    message = MIMEText(f"Your verification code is: {code}\n\nThis code expires in 10 minutes.")
+    message["Subject"] = "Your verification code"
+    message["From"] = gmail_address
+    message["To"] = email
+
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+        server.login(gmail_address, gmail_app_password)
+        server.sendmail(gmail_address, email, message.as_string())
 
 
 def verify_login_code(email: str, code: str) -> bool:
-    """Checks a 6-digit code against Supabase. Returns True if valid."""
+    """Checks a 6-digit code against what we stored. Returns True if valid, unused, and unexpired."""
     client = _supabase_client()
-    try:
-        result = client.auth.verify_otp({"email": email, "token": code, "type": "email"})
-        return result.user is not None
-    except Exception:
+    now = datetime.now(timezone.utc).isoformat()
+
+    result = (
+        client.table("login_codes")
+        .select("*")
+        .eq("email", email)
+        .eq("code", code)
+        .eq("used", False)
+        .gte("expires_at", now)
+        .execute()
+    )
+
+    if not result.data:
         return False
+
+    # Mark it used so it can't be replayed
+    row_id = result.data[0].get("id")
+    if row_id:
+        client.table("login_codes").update({"used": True}).eq("id", row_id).execute()
+    else:
+        # No id column (matches by email+code instead) -- still fine for a single-use code
+        client.table("login_codes").update({"used": True}).eq("email", email).eq("code", code).execute()
+
+    return True
 
 
 # ---- Credit balance management ----
